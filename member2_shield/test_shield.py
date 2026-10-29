@@ -284,6 +284,8 @@ def test_sentinel_tester_node(temp_repo):
     }
     res = sentinel_tester_node(state)
     assert "test_results" in res
+    assert "passed_count" in res["test_results"]
+    assert "failed_count" in res["test_results"]
     assert "agent_logs" in res
     assert len(res["agent_logs"]) == 1
     assert res["agent_logs"][0]["agent"] == "sentinel_tester"
@@ -342,6 +344,7 @@ def test_sentinel_verifier_node_failure():
     res = sentinel_verifier_node(state)
     assert res["verification_passed"] is False
     assert len(res["findings_and_issues"]) > 0
+    assert any("UNVERIFIED CLAIM:" in f for f in res["findings_and_issues"])
 
 
 def test_shadow_scan_secrets():
@@ -421,6 +424,67 @@ def test_shadow_council_node_passes_clean_diff():
     assert res["security_passed"] is True
     assert res["review_passed"] is True
     assert len(res["findings_and_issues"]) == 0
+
+
+def test_shadow_comment_filtering():
+    diff_comments = (
+        "+# Don't use eval(user_input)\n"
+        "+# Example: AWS_SECRET_KEY = 'AKIAIOSFODNN7EXAMPLE'\n"
+        "+timeout = 10  # Avoid eval(danger) in this loop\n"
+    )
+    violations = scan_diff_for_security_flaws(diff_comments)
+    assert len(violations) == 0, f"Comments should not trigger security violations: {violations}"
+
+    state = {
+        "user_request": "Set timeout",
+        "acceptance_criteria": ["timeout = 10"],
+        "git_diff": diff_comments,
+        "agent_logs": [],
+        "findings_and_issues": [],
+    }
+    res = shadow_council_node(state)
+    assert res["security_passed"] is True
+
+
+def test_shadow_multiline_and_executescript_sql():
+    diff_ml = (
+        "+query = f\"\"\"\n"
+        "+    SELECT * FROM users\n"
+        "+    WHERE id = {user_id}\n"
+        "+\"\"\"\n"
+        "+sqlite3.connect('app.db').executescript(f'SELECT * FROM logs WHERE tag = {tag}')\n"
+    )
+    violations = scan_diff_for_security_flaws(diff_ml)
+    assert len(violations) >= 2
+    assert any("multiline" in v.lower() or "triple-quoted" in v.lower() for v in violations)
+    assert any("executescript" in v.lower() for v in violations)
+
+
+def test_shadow_empty_diff_handling():
+    # 1. Empty diff with pending tasks fails review
+    state_pending = {
+        "git_diff": "",
+        "user_request": "Build feature",
+        "tasks": [{"id": "t1", "description": "Add feature", "target_files": ["app.py"], "status": "pending"}],
+        "test_results": {"passed": False},
+        "agent_logs": [],
+        "findings_and_issues": [],
+    }
+    res_pending = shadow_council_node(state_pending)
+    assert res_pending["review_passed"] is False
+    assert any("remain pending" in f for f in res_pending["findings_and_issues"])
+
+    # 2. Empty diff with completed tasks & passing tests passes review
+    state_completed = {
+        "git_diff": "",
+        "user_request": "Verify baseline",
+        "tasks": [{"id": "t1", "description": "Add feature", "target_files": ["app.py"], "status": "completed"}],
+        "test_results": {"passed": True},
+        "agent_logs": [],
+        "findings_and_issues": [],
+    }
+    res_completed = shadow_council_node(state_completed)
+    assert res_completed["review_passed"] is True
 
 
 # ==============================================================================
@@ -585,11 +649,22 @@ def run_standalone_test_suite() -> int:
         else:
             results.append(("11. Shadow Council Clean Code Approval", "FAILED", "Clean code rejected unexpectedly"))
 
+        # Step 11: Test Shadow Council Comment Filter & Multiline SQL
+        diff_comments_test = "+# Don't use eval(x)\n+x = 1 # Ignore eval\n"
+        diff_ml_test = "+query = f\"\"\"\n+    SELECT * FROM secret WHERE k = {v}\n+\"\"\"\n"
+        no_comment_vulns = len(scan_diff_for_security_flaws(diff_comments_test)) == 0
+        ml_caught = len(scan_diff_for_security_flaws(diff_ml_test)) > 0
+
+        if no_comment_vulns and ml_caught:
+            results.append(("12. Comment Filter & Multiline SQL Injection", "PASSED", "Zero false positives on comments; caught multiline SQL"))
+        else:
+            results.append(("12. Comment Filter & Multiline SQL Injection", "FAILED", "Comment filter or multiline SQL detection failed"))
+
     finally:
-        # Step 11: Cleanup ./temp_test_repo/
+        # Step 13: Cleanup ./temp_test_repo/
         safe_cleanup_dir(TEMP_TEST_DIR)
         cleaned_up = not os.path.exists(TEMP_TEST_DIR)
-        results.append(("12. Sandbox Teardown (./temp_test_repo/)", "PASSED" if cleaned_up else "FAILED", "Cleaned up test repository"))
+        results.append(("13. Sandbox Teardown (./temp_test_repo/)", "PASSED" if cleaned_up else "FAILED", "Cleaned up test repository"))
 
     # Print summary table
     print_summary_table(results)
