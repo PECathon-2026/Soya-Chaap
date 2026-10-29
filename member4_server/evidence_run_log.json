@@ -1,0 +1,69 @@
+{
+  "suite": "DevPilot (PS-001) Autonomous Systems Evaluation Suite",
+  "generated_at": "2026-10-29T19:58:58.141731+00:00",
+  "total_scenarios_evaluated": 5,
+  "total_passed": 5,
+  "total_duration_seconds": 8.57,
+  "results": [
+    {
+      "scenario_id": "01_feature_impl",
+      "title": "Feature Implementation",
+      "objective": "Implement slugify(text) and add unit tests while preserving truncate & count_words",
+      "status": "PASSED",
+      "initial_tests_passed": true,
+      "final_tests_passed": true,
+      "stdout_summary": "============================== 9 passed in 0.05s ==============================",
+      "execution_time_sec": 0.774
+    },
+    {
+      "scenario_id": "02_bug_investigation",
+      "title": "Bug Investigation",
+      "objective": "Resolve off-by-one window index calculation error in calculate_moving_average",
+      "status": "PASSED",
+      "initial_seeded_failure_confirmed": true,
+      "bug_remediated": true,
+      "final_tests_passed": true,
+      "stdout_summary": "============================== 4 passed in 0.04s ==============================",
+      "fix_diff": "- for i in range(len(values) - window_size):\n+ for i in range(len(values) - window_size + 1):",
+      "execution_time_sec": 0.668
+    },
+    {
+      "scenario_id": "03_test_driven_recovery",
+      "title": "Test-Driven Recovery",
+      "objective": "Build validate_token from scratch to satisfy bearer hex protocol and length checks",
+      "status": "PASSED",
+      "initial_stub_failure_confirmed": true,
+      "implementation_verified": true,
+      "final_tests_passed": true,
+      "stdout_summary": "============================== 5 passed in 0.12s ==============================",
+      "execution_time_sec": 0.991
+    },
+    {
+      "scenario_id": "04_security_code_review",
+      "title": "Security & Code Review",
+      "objective": "Detect hardcoded secret and SQL injection, reject diff, and enforce parameterized remediation",
+      "status": "PASSED",
+      "initial_security_intercepted": true,
+      "intercepted_findings": [
+        "CRITICAL: Hardcoded AWS Access Key detected in source code.",
+        "CRITICAL: Unredacted AWS Secret Key found in source code.",
+        "HIGH: SQL query built using raw string interpolation (SQL Injection vulnerability)."
+      ],
+      "remediation_verified": true,
+      "post_remediation_findings_count": 0,
+      "final_tests_passed": true,
+      "execution_time_sec": 0.895
+    },
+    {
+      "scenario_id": "05_unexpected_conditions",
+      "title": "Unexpected Conditions & Bounded Autonomy",
+      "objective": "Handle unreachable network host with bounded autonomy and graceful degradation",
+      "status": "PASSED",
+      "initial_unhandled_crash_confirmed": true,
+      "bounded_fallback_verified": true,
+      "final_tests_passed": true,
+      "stdout_summary": "============================== 1 passed in 0.57s ==============================",
+      "execution_time_sec": 1.347
+    }
+  ]
+}
