@@ -3,7 +3,8 @@ member1_orchestrator/shogun.py
 The Shogun's Council: Lead Planning & Codebase Reconnaissance Node.
 
 Responsibilities:
-- Uses langchain_google_genai.ChatGoogleGenerativeAI (gemini-2.5-flash) with structured output.
+- Uses langchain_google_genai.ChatGoogleGenerativeAI (SHOGUN_MODEL, default: gemini-2.5-pro) with structured output.
+- Configured with temperature=0.2 for strategic, consistent architectural planning.
 - Defines Pydantic schema ShogunPlanOutput with acceptance_criteria, tasks, and reasoning.
 - Inspects target repository context using safe shield tools (with safe local fallback).
 - When iteration_count == 0: Analyzes user_request and file listings to generate initial
@@ -15,6 +16,13 @@ Responsibilities:
 """
 
 from __future__ import annotations
+
+# Automatic Environment Loading
+try:
+    import dotenv
+    dotenv.load_dotenv()
+except ImportError:
+    pass
 
 import json
 import logging
@@ -275,7 +283,7 @@ def _invoke_llm_planner(
     existing_tasks: List[TaskItem],
 ) -> Optional[ShogunPlanOutput]:
     """
-    Invokes ChatGoogleGenerativeAI(model='gemini-2.5-flash', temperature=0.2)
+    Invokes ChatGoogleGenerativeAI(model=SHOGUN_MODEL, temperature=0.2)
     with .with_structured_output(ShogunPlanOutput).
     Returns None if GEMINI_API_KEY is missing or if invocation fails.
     """
@@ -288,8 +296,9 @@ def _invoke_llm_planner(
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_google_genai import ChatGoogleGenerativeAI
 
+        model_name = os.environ.get("SHOGUN_MODEL", "gemini-2.5-pro")
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model=model_name,
             temperature=0.2,
             api_key=api_key,
         )
@@ -349,7 +358,7 @@ def shogun_planner_node(state: MissionState) -> Dict[str, Any]:
     LangGraph Node: shogun_planner
     
     1. Inspects repo_path using safe tools from member2_shield.file_tools (with local fallback).
-    2. Initializes ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2).
+    2. Initializes ChatGoogleGenerativeAI(model=SHOGUN_MODEL, temperature=0.2).
     3. Uses .with_structured_output(ShogunPlanOutput).
     4. On iteration_count == 0: Supplies user_request and file listings to generate initial plan.
     5. On iteration_count > 0: Supplies findings_and_issues and test diagnostics to adapt tasks,
@@ -370,7 +379,7 @@ def shogun_planner_node(state: MissionState) -> Dict[str, Any]:
     # 1. Reconnaissance via Safe Shield Tools
     repo_context = _inspect_codebase(repo_path, user_request)
 
-    # 2. Plan Generation with Gemini 2.5 Flash (with graceful fallback)
+    # 2. Plan Generation with Gemini 2.5 Pro (with graceful fallback)
     plan = _invoke_llm_planner(
         user_request=user_request,
         repo_context=repo_context,
@@ -423,6 +432,8 @@ def shogun_planner_node(state: MissionState) -> Dict[str, Any]:
         )
     )
 
+    model_used = os.environ.get("SHOGUN_MODEL", "gemini-2.5-pro")
+
     log_entry: Dict[str, Any] = {
         "agent": "shogun_planner",
         "action": action,
@@ -430,6 +441,7 @@ def shogun_planner_node(state: MissionState) -> Dict[str, Any]:
         "iteration": iteration_count,
         "message": explanation,
         "details": {
+            "model_used": model_used,
             "reasoning": plan.reasoning,
             "task_ids": [t["id"] for t in formatted_tasks],
             "acceptance_criteria_count": len(plan.acceptance_criteria),
@@ -443,3 +455,31 @@ def shogun_planner_node(state: MissionState) -> Dict[str, Any]:
         "tasks": formatted_tasks,
         "agent_logs": [log_entry],
     }
+
+
+if __name__ == "__main__":
+    print("=== Member 1 Orchestrator: Running shogun.py Self-Tests ===")
+    test_state: MissionState = {
+        "user_request": "Implement slugify in string_utils.py",
+        "repo_path": "./member4_server/sandbox_repos/01_feature_impl",
+        "acceptance_criteria": [],
+        "tasks": [],
+        "agent_logs": [],
+        "findings_and_issues": [],
+        "git_diff": "",
+        "test_results": {},
+        "verification_passed": False,
+        "security_passed": False,
+        "review_passed": False,
+        "iteration_count": 0,
+        "max_iterations": 3,
+        "human_approved": False,
+    }
+
+    res = shogun_planner_node(test_state)
+    assert len(res["tasks"]) > 0, "Tasks should be generated"
+    assert len(res["acceptance_criteria"]) > 0, "Acceptance criteria should be generated"
+    assert len(res["agent_logs"]) == 1, "Should generate exactly 1 log entry"
+    assert "model_used" in res["agent_logs"][0]["details"], "Model name should be recorded in details"
+    print(f"[PASS] shogun_planner_node verified (Model: {res['agent_logs'][0]['details']['model_used']}).")
+    print("=== All shogun.py self-tests passed successfully! ===")

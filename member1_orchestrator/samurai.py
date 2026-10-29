@@ -3,7 +3,8 @@ member1_orchestrator/samurai.py
 The Samurai Forge: Core Implementation & Code Repair Node.
 
 Responsibilities:
-- Uses langchain_google_genai.ChatGoogleGenerativeAI (gemini-2.5-flash) with structured output.
+- Uses langchain_google_genai.ChatGoogleGenerativeAI (SAMURAI_MODEL, default: gemini-2.5-flash) with structured output.
+- Configured with temperature=0.1 for precise, low-variance code editing and bug repairs.
 - Retrieves the next pending task from state["tasks"].
 - Reads target files using member2_shield.file_tools.read_file_safe (with local fallback).
 - Instructs the Gemini model to implement clean code and resolve active error traces or
@@ -15,6 +16,13 @@ Responsibilities:
 """
 
 from __future__ import annotations
+
+# Automatic Environment Loading
+try:
+    import dotenv
+    dotenv.load_dotenv()
+except ImportError:
+    pass
 
 import json
 import logging
@@ -290,7 +298,7 @@ def _invoke_llm_forge(
     iteration_count: int,
 ) -> Optional[List[str]]:
     """
-    Invokes ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
+    Invokes ChatGoogleGenerativeAI(model=SAMURAI_MODEL, temperature=0.1)
     with .with_structured_output(SamuraiCodeOutput).
     Returns list of modified relative file paths or None if GEMINI_API_KEY is missing/fails.
     """
@@ -303,8 +311,9 @@ def _invoke_llm_forge(
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_google_genai import ChatGoogleGenerativeAI
 
+        model_name = os.environ.get("SAMURAI_MODEL", "gemini-2.5-flash")
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model=model_name,
             temperature=0.1,
             api_key=api_key,
         )
@@ -379,7 +388,7 @@ def samurai_forge_node(state: MissionState) -> Dict[str, Any]:
     """
     LangGraph Node: samurai_forge
     
-    1. Initializes ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1).
+    1. Initializes ChatGoogleGenerativeAI(model=SAMURAI_MODEL, temperature=0.1).
     2. Retrieves the next pending task from state["tasks"].
     3. Reads relevant files using member2_shield.file_tools.read_file_safe (with fallback).
     4. Instructs Gemini to write code resolving exact errors from state["findings_and_issues"]
@@ -461,6 +470,8 @@ def samurai_forge_node(state: MissionState) -> Dict[str, Any]:
         f"modified {len(modified_files)} file(s). Git diff: {len(diff)} bytes."
     )
 
+    model_used = os.environ.get("SAMURAI_MODEL", "gemini-2.5-flash")
+
     log_entry: Dict[str, Any] = {
         "agent": "samurai_forge",
         "action": action,
@@ -468,6 +479,7 @@ def samurai_forge_node(state: MissionState) -> Dict[str, Any]:
         "iteration": iteration_count,
         "message": log_message,
         "details": {
+            "model_used": model_used,
             "executed_task_id": active_task.get("id"),
             "task_description": active_task.get("description"),
             "target_files": target_files,
@@ -488,3 +500,38 @@ def samurai_forge_node(state: MissionState) -> Dict[str, Any]:
         "git_diff": diff,
         "agent_logs": [log_entry],
     }
+
+
+if __name__ == "__main__":
+    print("=== Member 1 Orchestrator: Running samurai.py Self-Tests ===")
+    test_state: MissionState = {
+        "user_request": "Implement slugify in string_utils.py",
+        "repo_path": "./member4_server/sandbox_repos/01_feature_impl",
+        "acceptance_criteria": ["slugify function exists"],
+        "tasks": [
+            {
+                "id": "TASK-001",
+                "description": "Implement slugify in string_utils.py",
+                "target_files": ["string_utils.py"],
+                "status": "pending",
+            }
+        ],
+        "agent_logs": [],
+        "findings_and_issues": [],
+        "git_diff": "",
+        "test_results": {},
+        "verification_passed": False,
+        "security_passed": False,
+        "review_passed": False,
+        "iteration_count": 0,
+        "max_iterations": 3,
+        "human_approved": False,
+    }
+
+    res = samurai_forge_node(test_state)
+    assert len(res["tasks"]) == 1, "Should have 1 task"
+    assert res["tasks"][0]["status"] == "completed", "Executed task should be marked completed"
+    assert len(res["agent_logs"]) == 1, "Should generate exactly 1 log entry"
+    assert "model_used" in res["agent_logs"][0]["details"], "Model name should be recorded in details"
+    print(f"[PASS] samurai_forge_node verified (Model: {res['agent_logs'][0]['details']['model_used']}).")
+    print("=== All samurai.py self-tests passed successfully! ===")

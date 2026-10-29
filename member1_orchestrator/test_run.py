@@ -38,7 +38,17 @@ def main():
             if isinstance(state_update, dict):
                 logs = state_update.get("agent_logs")
                 if logs and isinstance(logs, list):
-                    print(f"    Latest Log: {logs[-1].get('message', logs[-1])}")
+                    last_log = logs[-1]
+                    details = last_log.get("details", {})
+                    model_rep = (
+                        last_log.get("model")
+                        or (details.get("model_used") if isinstance(details, dict) else None)
+                        or (details.get("model") if isinstance(details, dict) else None)
+                        or last_log.get("model_used")
+                        or "deterministic"
+                    )
+                    print(f"    Latest Log: {last_log.get('message', last_log)}")
+                    print(f"    Active Model: {model_rep}")
             # Handle human oversight pause (__interrupt__)
             elif node_name == "__interrupt__":
                 print("    [PAUSED] Reached Human-in-the-Loop approval checkpoint.")
