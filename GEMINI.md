@@ -5,6 +5,11 @@ Core Principle: "Plan like a Shogun. Build like a Samurai. Test like a Sentinel.
 
 ## 1. Tech Stack & Multi-Agent Architecture
 - Backend: Python 3.11+ + FastAPI (WebSockets for real-time state/log streaming) + LangGraph (StateGraph with cyclic feedback loops, parallel fan-out/fan-in execution, and MemorySaver with interrupt_before=["finalize_changes"] for Human-in-the-Loop approval).
+- Heterogeneous Subtask-Specialized LLM Models:
+  - Shogun's Council (Planner): `SHOGUN_MODEL` (default: `gemini-2.5-pro` for deep reasoning, architectural exploration, and task breakdown).
+  - Samurai Forge (Developer): `SAMURAI_MODEL` (default: `gemini-2.5-flash` for high-throughput code synthesis and surgical defect repair).
+  - Sentinel Dojo (Verifier): `SENTINEL_MODEL` (default: `gemini-2.5-flash` for evidence verification against acceptance criteria).
+  - Shadow Council (Security Auditor): `SHADOW_MODEL` (default: `gemini-2.5-pro` for multi-layered static/semantic security and code quality review).
 - Frontend: React (Vite + Tailwind CSS) + React Flow (GuildGraph.jsx live DAG) + Diff Viewer (ApprovalModal.jsx).
 - Execution Flow:
   START -> shogun_planner -> samurai_forge -> Parallel Fan-Out (sentinel_tester || sentinel_verifier || shadow_council) -> Parallel Fan-In (evaluation_router).

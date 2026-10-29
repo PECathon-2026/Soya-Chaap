@@ -240,10 +240,11 @@ def _run_llm_code_review(
         from langchain_google_genai import ChatGoogleGenerativeAI
         from langchain_core.messages import SystemMessage, HumanMessage
 
-        model_name = os.environ.get("SHADOW_MODEL", "gemini-2.5-pro")
+        model_name = os.environ.get("SHADOW_MODEL", os.environ.get("DEFAULT_MODEL", "gemini-2.5-pro"))
+        temperature = float(os.environ.get("SHADOW_TEMPERATURE", 0.0))
         llm = ChatGoogleGenerativeAI(
             model=model_name,
-            temperature=0.0,
+            temperature=temperature,
             api_key=api_key,
         )
 
@@ -408,7 +409,7 @@ def shadow_council_node(state: MissionState) -> Dict[str, Any]:
     user_request = state.get("user_request", "")
     criteria = state.get("acceptance_criteria", [])
 
-    model_name = os.environ.get("SHADOW_MODEL", "gemini-2.5-pro")
+    model_name = os.environ.get("SHADOW_MODEL", os.environ.get("DEFAULT_MODEL", "gemini-2.5-pro"))
 
     # Layer 1: Deterministic Static Regex Security Scan
     security_violations = scan_diff_for_security_flaws(git_diff)
@@ -454,6 +455,7 @@ def shadow_council_node(state: MissionState) -> Dict[str, Any]:
         audit_details = f"AUDIT REJECTED [{engine_tag}]: {'; '.join(rejection_reasons)}."
 
     details_dict: Dict[str, Any] = {
+        "model_used": review_model,
         "review_engine": review_engine,
         "model": review_model,
         "audit_summary": audit_details,
@@ -625,7 +627,9 @@ if __name__ == "__main__":
     assert "AUDIT APPROVED" in res_clean["agent_logs"][0]["details"]["audit_summary"]
     assert "review_engine" in res_clean["agent_logs"][0]["details"]
     assert "model" in res_clean["agent_logs"][0]["details"]
-    assert res_clean["agent_logs"][0]["details"]["model"] == os.environ.get("SHADOW_MODEL", "gemini-2.5-pro")
+    expected_model = os.environ.get("SHADOW_MODEL", os.environ.get("DEFAULT_MODEL", "gemini-2.5-pro"))
+    assert res_clean["agent_logs"][0]["details"]["model"] == expected_model
+    assert res_clean["agent_logs"][0]["details"]["model_used"] == expected_model
     print(f"[PASS] 12. Clean production code approved with details dict (model={res_clean['agent_logs'][0]['details']['model']}).")
 
     print("=== All hardened shadow.py security & code review self-tests passed successfully! ===")

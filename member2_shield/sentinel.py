@@ -301,10 +301,11 @@ def _verify_with_llm(
         from langchain_google_genai import ChatGoogleGenerativeAI
         from langchain_core.messages import SystemMessage, HumanMessage
 
-        model_name = os.environ.get("SENTINEL_MODEL", "gemini-2.5-flash")
+        model_name = os.environ.get("SENTINEL_MODEL", os.environ.get("DEFAULT_MODEL", "gemini-2.5-flash"))
+        temperature = float(os.environ.get("SENTINEL_TEMPERATURE", 0.0))
         llm = ChatGoogleGenerativeAI(
             model=model_name,
-            temperature=0.0,
+            temperature=temperature,
             api_key=api_key,
         )
 
@@ -485,7 +486,7 @@ def sentinel_verifier_node(state: MissionState) -> Dict[str, Any]:
     git_diff = state.get("git_diff", "")
     test_results = state.get("test_results", {})
 
-    active_model = os.environ.get("SENTINEL_MODEL", "gemini-2.5-flash")
+    active_model = os.environ.get("SENTINEL_MODEL", os.environ.get("DEFAULT_MODEL", "gemini-2.5-flash"))
     verification_data: Dict[str, Any] = {}
 
     if not criteria:

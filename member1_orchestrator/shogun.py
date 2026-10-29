@@ -296,10 +296,11 @@ def _invoke_llm_planner(
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        model_name = os.environ.get("SHOGUN_MODEL", "gemini-2.5-pro")
+        model_name = os.environ.get("SHOGUN_MODEL", os.environ.get("DEFAULT_MODEL", "gemini-2.5-pro"))
+        temperature = float(os.environ.get("SHOGUN_TEMPERATURE", 0.2))
         llm = ChatGoogleGenerativeAI(
             model=model_name,
-            temperature=0.2,
+            temperature=temperature,
             api_key=api_key,
         )
 
@@ -432,7 +433,7 @@ def shogun_planner_node(state: MissionState) -> Dict[str, Any]:
         )
     )
 
-    model_used = os.environ.get("SHOGUN_MODEL", "gemini-2.5-pro")
+    model_used = os.environ.get("SHOGUN_MODEL", os.environ.get("DEFAULT_MODEL", "gemini-2.5-pro"))
 
     log_entry: Dict[str, Any] = {
         "agent": "shogun_planner",

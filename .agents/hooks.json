@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./.agents/scripts/antigravity-guard.sh"
+            "command": "python .agents/scripts/antigravity_guard.py"
           }
         ]
       }
@@ -17,11 +17,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./.agents/scripts/audit-logger.sh"
+            "command": "python .agents/scripts/audit_logger.py"
           }
         ]
       }
     ]
   }
 }
-

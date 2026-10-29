@@ -311,10 +311,11 @@ def _invoke_llm_forge(
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        model_name = os.environ.get("SAMURAI_MODEL", "gemini-2.5-flash")
+        model_name = os.environ.get("SAMURAI_MODEL", os.environ.get("DEFAULT_MODEL", "gemini-2.5-flash"))
+        temperature = float(os.environ.get("SAMURAI_TEMPERATURE", 0.1))
         llm = ChatGoogleGenerativeAI(
             model=model_name,
-            temperature=0.1,
+            temperature=temperature,
             api_key=api_key,
         )
 
@@ -470,7 +471,7 @@ def samurai_forge_node(state: MissionState) -> Dict[str, Any]:
         f"modified {len(modified_files)} file(s). Git diff: {len(diff)} bytes."
     )
 
-    model_used = os.environ.get("SAMURAI_MODEL", "gemini-2.5-flash")
+    model_used = os.environ.get("SAMURAI_MODEL", os.environ.get("DEFAULT_MODEL", "gemini-2.5-flash"))
 
     log_entry: Dict[str, Any] = {
         "agent": "samurai_forge",
