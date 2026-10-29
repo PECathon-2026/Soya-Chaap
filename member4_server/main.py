@@ -75,6 +75,7 @@ class ConnectionManager:
             try:
                 await connection.send_text(json.dumps(payload))
             except Exception:
+
                 disconnected.append(connection)
 
         for conn in disconnected:
@@ -233,6 +234,7 @@ def backup_repo_files(repo_path: str) -> Dict[str, str]:
                     with open(full_path, "r", encoding="utf-8") as handle:
                         snapshot[rel_path] = handle.read()
                 except Exception:
+    
                     pass
     return snapshot
 
@@ -362,10 +364,13 @@ async def run_mission_workflow(
         m1_available = False
         devpilot_graph = None
         try:
-            from member1_orchestrator.graph import devpilot_graph as m1_graph
-            devpilot_graph = m1_graph
+            from member1_orchestrator.graph import build_devpilot_graph
+            devpilot_graph = build_devpilot_graph()
+
+    
+
             m1_available = True
-        except (ImportError, ModuleNotFoundError, AttributeError):
+        except Exception:
             m1_available = False
 
         if m1_available and devpilot_graph is not None:
@@ -793,6 +798,7 @@ async def websocket_mission_stream(websocket: WebSocket):
                 if msg.get("action") == "ping":
                     await websocket.send_text(json.dumps({"event": "PONG", "timestamp": datetime.now(timezone.utc).isoformat()}))
             except Exception:
+
                 pass
     except WebSocketDisconnect:
         manager.disconnect(websocket)
