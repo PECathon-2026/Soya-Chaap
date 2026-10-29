@@ -3,18 +3,15 @@ member1_orchestrator/samurai.py
 The Samurai Forge: Core Implementation & Code Repair Node.
 
 Responsibilities:
-- Reads target files, searches codebase conventions, and applies safe modifications.
-- Explicitly utilizes safe shield tools:
-    * member2_shield.file_tools.read_file_safe
-    * member2_shield.file_tools.write_file_safe
-    * member2_shield.file_tools.search_code_safe
-    * member2_shield.shell_tools.get_git_diff
-- Provides robust local fallback helpers if Member 2 has not finished pushing.
+- Uses langchain_google_genai.ChatGoogleGenerativeAI (gemini-2.5-flash) with structured output.
 - Retrieves the next pending task from state["tasks"].
-- In retry loops (iteration_count > 0), inspects findings_and_issues to systematically
-  repair syntax errors, failing tests, and security vulnerabilities.
-- Captures latest uncommitted diff and marks executed task as completed.
-- Preserves codebase conventions and emits additive agent_logs.
+- Reads target files using member2_shield.file_tools.read_file_safe (with local fallback).
+- Instructs the Gemini model to implement clean code and resolve active error traces or
+  security critiques from state["findings_and_issues"] while preserving project style.
+- Applies modifications using member2_shield.file_tools.write_file_safe (with fallback).
+- Captures latest uncommitted diff via member2_shield.shell_tools.get_git_diff (with fallback).
+- Marks the executed task as completed and returns state updates for tasks, git_diff, and agent_logs.
+- Provides graceful fallback handling when GEMINI_API_KEY is missing so tests never crash.
 """
 
 from __future__ import annotations
@@ -30,7 +27,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# State Schema Imports with Fallback
+# State Schema Imports with Fail-Safe Fallbacks
 # ---------------------------------------------------------------------------
 try:
     from shared_contract import MissionState, TaskItem
@@ -61,7 +58,7 @@ except ImportError:
         human_approved: bool
 
 # ---------------------------------------------------------------------------
-# Shield Tools Imports with In-Scope Fallbacks
+# Shield Tools Imports with In-Scope Safe Fallbacks
 # ---------------------------------------------------------------------------
 try:
     from member2_shield.file_tools import (
@@ -162,14 +159,14 @@ if not logger.handlers:
 # ---------------------------------------------------------------------------
 # Pydantic Schemas for Structured LLM Code Modifications
 # ---------------------------------------------------------------------------
-class ModifiedFile(BaseModel):
+class FileEdit(BaseModel):
     relative_path: str = Field(description="Relative path of file to create or modify")
-    full_content: str = Field(description="Complete, functional new content of the file")
-    rationale: str = Field(description="Explanation of edits made")
+    content: str = Field(description="Complete, fully functional new content of the file")
+    rationale: str = Field(description="Explanation of code changes made")
 
-class ForgeOutputModel(BaseModel):
-    files: List[ModifiedFile] = Field(description="List of modified or created files")
-    summary: str = Field(description="Summary of work performed")
+class SamuraiCodeOutput(BaseModel):
+    files: List[FileEdit] = Field(description="List of modified or newly created files")
+    reasoning: str = Field(description="Detailed explanation of implementation and defect resolution")
 
 # ---------------------------------------------------------------------------
 # Code Defect Analysis & Targeted Deterministic Patcher
@@ -281,7 +278,7 @@ def _apply_deterministic_repairs(
     return modified
 
 # ---------------------------------------------------------------------------
-# LLM-Powered Code Generator
+# LLM-Powered Code Generator with ChatGoogleGenerativeAI
 # ---------------------------------------------------------------------------
 def _invoke_llm_forge(
     repo_path: str,
@@ -293,23 +290,26 @@ def _invoke_llm_forge(
     iteration_count: int,
 ) -> Optional[List[str]]:
     """
-    Invokes ChatGoogleGenerativeAI to generate code modifications for the active task.
-    Returns list of modified relative file paths or None if fallback needed.
+    Invokes ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
+    with .with_structured_output(SamuraiCodeOutput).
+    Returns list of modified relative file paths or None if GEMINI_API_KEY is missing/fails.
     """
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
+        logger.info("GEMINI_API_KEY not found; utilizing graceful deterministic Samurai engine.")
         return None
 
     try:
-        from langchain_core.messages import SystemMessage, HumanMessage
+        from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
         llm = ChatGoogleGenerativeAI(
-            model=model_name,
-            google_api_key=api_key,
+            model="gemini-2.5-flash",
             temperature=0.1,
+            api_key=api_key,
         )
+
+        structured_llm = llm.with_structured_output(SamuraiCodeOutput)
 
         target_files = active_task.get("target_files", [])
         existing_contents: Dict[str, str] = {}
@@ -330,11 +330,12 @@ def _invoke_llm_forge(
                 pass
 
         system_prompt = (
-            "You are The Samurai Forge: the elite software implementation engineer of the DevPilot Guild. "
-            "Your mission is to write clean, secure, production-grade code that satisfies the assigned task and acceptance criteria. "
-            "If prior iterations reported findings or issues, systematically fix every defect. "
+            "You are The Samurai Forge: Lead Implementation and Code Repair Engineer of the DevPilot Guild. "
+            "Your objective is to write production-grade, bug-free, secure code that satisfies the assigned task and acceptance criteria. "
+            "If findings_and_issues contains error traces, test failures, or security critiques, YOU MUST resolve those exact errors "
+            "while maintaining the existing project style, imports, and architecture. "
             "Never introduce placeholders, TODOs, raw SQL vulnerabilities, or exposed secrets. "
-            "Always return the COMPLETE, fully valid content for every modified file."
+            "Always output the complete, fully valid content for each file in the target files list."
         )
 
         prompt_payload = {
@@ -351,25 +352,24 @@ def _invoke_llm_forge(
         user_content = (
             f"Implement or repair the files required for active task {active_task.get('id')}: {active_task.get('description')}.\n"
             f"{json.dumps(prompt_payload, indent=2)}\n\n"
-            "Return valid JSON adhering to the ForgeOutputModel schema."
+            "Return valid structured output matching SamuraiCodeOutput."
         )
 
-        structured_llm = llm.with_structured_output(ForgeOutputModel)
-        result: ForgeOutputModel = structured_llm.invoke([
+        result: SamuraiCodeOutput = structured_llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_content),
         ])
 
         modified: List[str] = []
         for file_mod in result.files:
-            write_file_safe(repo_path, file_mod.relative_path, file_mod.full_content)
+            write_file_safe(repo_path, file_mod.relative_path, file_mod.content)
             modified.append(file_mod.relative_path)
-            logger.info("Samurai Forge wrote file via LLM: %s (%s)", file_mod.relative_path, file_mod.rationale)
+            logger.info("Samurai Forge wrote file via Gemini: %s (%s)", file_mod.relative_path, file_mod.rationale)
 
         return modified
 
     except Exception as exc:
-        logger.warning("LLM Samurai Forge encountered error: %s. Reverting to deterministic patcher.", exc)
+        logger.warning("Gemini Samurai Forge encountered error: %s. Reverting to deterministic patcher.", exc)
         return None
 
 # ---------------------------------------------------------------------------
@@ -379,14 +379,15 @@ def samurai_forge_node(state: MissionState) -> Dict[str, Any]:
     """
     LangGraph Node: samurai_forge
     
-    1. Retrieves the next pending task from state["tasks"].
-    2. Inspects target files using read_file_safe and search_code_safe.
-    3. Examines active error traces or security critiques in state["findings_and_issues"].
-    4. Applies code modifications using write_file_safe.
-    5. Captures the latest uncommitted diff via get_git_diff.
-    6. Marks the executed task as completed (or in_progress).
-    7. Returns updated tasks, git_diff, and an additive agent_logs entry:
-       {"agent_logs": [{"agent": "samurai_forge", "action": "task_executed", "details": ...}]}
+    1. Initializes ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1).
+    2. Retrieves the next pending task from state["tasks"].
+    3. Reads relevant files using member2_shield.file_tools.read_file_safe (with fallback).
+    4. Instructs Gemini to write code resolving exact errors from state["findings_and_issues"]
+       while maintaining project style.
+    5. Applies edits via member2_shield.file_tools.write_file_safe (with fallback).
+    6. Captures git_diff using member2_shield.shell_tools.get_git_diff (with fallback).
+    7. Marks the executed task as completed and returns state updates for tasks, git_diff, and agent_logs.
+    8. Provides graceful fallback handling when GEMINI_API_KEY is missing so mock tests never crash.
     """
     repo_path = state.get("repo_path", ".")
     tasks = state.get("tasks", [])
@@ -414,18 +415,16 @@ def samurai_forge_node(state: MissionState) -> Dict[str, Any]:
     target_files = active_task.get("target_files", [])
 
     # 2. Context-aware inspection using safe tools
-    # Tool: Code Search across repository for relevant context
     context_search_results = search_code_safe(repo_path, "def ")
     logger.debug("Discovered %d function definitions across repo context.", len(context_search_results))
 
-    # Tool: Safe file reads on target files
     for f in target_files:
         try:
             _ = read_file_safe(repo_path, f)
         except Exception:
             pass
 
-    # 3. Apply Code Modifications (LLM if available, otherwise deterministic patcher)
+    # 3. Apply Code Modifications (Gemini 2.5 Flash with graceful fallback)
     modified_files = _invoke_llm_forge(
         repo_path=repo_path,
         active_task=active_task,
@@ -437,7 +436,6 @@ def samurai_forge_node(state: MissionState) -> Dict[str, Any]:
     )
 
     if modified_files is None:
-        # Tool: Safe file writes executed inside deterministic patcher
         modified_files = _apply_deterministic_repairs(
             repo_path=repo_path,
             target_files=target_files,
@@ -448,7 +446,7 @@ def samurai_forge_node(state: MissionState) -> Dict[str, Any]:
     # 4. Capture latest uncommitted diff via Shield Shell Tool
     diff = get_git_diff(repo_path)
 
-    # 5. Mark the executed task as completed (or in_progress)
+    # 5. Mark the executed task as completed
     updated_tasks: List[TaskItem] = []
     for t in tasks:
         tc = dict(t)

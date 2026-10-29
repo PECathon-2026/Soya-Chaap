@@ -8,7 +8,7 @@ from shared_contract import MissionState
 from member1_orchestrator.graph import build_devpilot_graph
 
 def main():
-    print("Testing DevPilot LangGraph flow...")
+    print("Testing DevPilot LangGraph flow with Gemini...")
     graph = build_devpilot_graph()
     
     initial_state: MissionState = {
@@ -28,17 +28,22 @@ def main():
         "human_approved": False
     }
 
-    config = {"configurable": {"thread_id": "test-session-001"}}
+    config = {"configurable": {"thread_id": "session-test-002"}}
     
-    # Stream node execution events
     for event in graph.stream(initial_state, config=config):
         for node_name, state_update in event.items():
             print(f"==> Executed Node: {node_name}")
-            logs = state_update.get("agent_logs")
-            if logs:
-                print(f"    Log: {logs[-1]}")
+            
+            # Handle standard node updates (dictionary)
+            if isinstance(state_update, dict):
+                logs = state_update.get("agent_logs")
+                if logs and isinstance(logs, list):
+                    print(f"    Latest Log: {logs[-1].get('message', logs[-1])}")
+            # Handle human oversight pause (__interrupt__)
+            elif node_name == "__interrupt__":
+                print("    [PAUSED] Reached Human-in-the-Loop approval checkpoint.")
 
-    print("\nState Machine paused successfully at human gate or completed.")
+    print("\nState Machine execution complete! Ready for FastAPI WebSocket bridge.")
 
 if __name__ == "__main__":
     main()
