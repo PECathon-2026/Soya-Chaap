@@ -331,6 +331,8 @@ def test_sentinel_verifier_node_success():
     assert res["verification_passed"] is True
     assert len(res["findings_and_issues"]) == 0
     assert res["agent_logs"][0]["agent"] == "sentinel_verifier"
+    assert "model" in res["agent_logs"][0]
+    assert "model_used" in res["agent_logs"][0]["details"]
 
 
 def test_sentinel_verifier_node_failure():
@@ -424,6 +426,9 @@ def test_shadow_council_node_passes_clean_diff():
     assert res["security_passed"] is True
     assert res["review_passed"] is True
     assert len(res["findings_and_issues"]) == 0
+    assert "review_engine" in res["agent_logs"][0]["details"]
+    assert "model" in res["agent_logs"][0]["details"]
+    assert res["agent_logs"][0]["details"]["model"] == os.environ.get("SHADOW_MODEL", "gemini-2.5-pro")
 
 
 def test_shadow_comment_filtering():

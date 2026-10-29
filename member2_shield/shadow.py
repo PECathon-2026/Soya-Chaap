@@ -2,20 +2,24 @@
 Member 2 Shield: Shadow Council
 Multi-layered static and semantic security review agent node.
 
-1. Deterministic Static Regex Scan:
+1. Heterogeneous Model Assignment:
+   - Shadow Council uses SHADOW_MODEL (default: "gemini-2.5-pro") with temperature=0.0
+     for deterministic, deep semantic security auditing and code quality review.
+   - Records details={"review_engine": "llm", "model": model_name, ...} in agent_logs.
+
+2. Deterministic Static Regex Scan:
    - Hardcoded secrets: AWS access keys, generic API keys (sk-...), private keys, tokens.
    - Dangerous dynamic execution: eval(, exec(, os.system(, raw SQL formatting (f"SELECT... {user_input}"),
      triple-quoted multiline f-strings f\"\"\"SELECT ... {var}\"\"\", and sqlite3 executescript(f"...").
    - Blocks immediately, sets security_passed = False, appends flagged line + reason.
    - Filters out pure comment lines (# ...) and strips trailing inline comments to avoid false positives.
 
-2. Semantic Code Review (LLM Inspector + Resilient Deterministic Fallback):
-   - Uses ChatGoogleGenerativeAI (Gemini 2.5 Flash) when API key is present.
+3. Semantic Code Review (LLM Inspector + Resilient Deterministic Fallback):
+   - Uses ChatGoogleGenerativeAI (Gemini 2.5 Pro) when API key is present.
    - Resiliently falls back to deterministic heuristic code review if API key is missing or call fails.
-   - Explicitly records review engine ('model="gemini-2.5-flash"' vs 'review_engine="deterministic_heuristic_fallback"') in agent_logs.
    - Context-aware empty diff evaluation: inspects state["tasks"] for pending work vs completed baseline.
 
-3. Detailed audit trail written to agent_logs.
+4. Detailed audit trail written to agent_logs.
 """
 
 # 1. Automatic Environment Loading
@@ -224,8 +228,8 @@ def _run_llm_code_review(
     acceptance_criteria: List[str],
 ) -> Optional[Dict[str, Any]]:
     """
-    Semantic code review via LangChain Google GenAI (ChatGoogleGenerativeAI) with gemini-2.5-flash.
-    Reviews git diff for readability, repo conventions, edge-case regressions, and unhandled exceptions.
+    Semantic code review via LangChain Google GenAI (ChatGoogleGenerativeAI) with SHADOW_MODEL (default: gemini-2.5-pro).
+    Reviews git diff for readability, repo conventions, edge-case regressions, and unhandled exceptions at temperature=0.0.
     Returns structured dict with 'review_passed', 'critiques', 'review_engine', and 'model', or None on failure.
     """
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -236,10 +240,11 @@ def _run_llm_code_review(
         from langchain_google_genai import ChatGoogleGenerativeAI
         from langchain_core.messages import SystemMessage, HumanMessage
 
+        model_name = os.environ.get("SHADOW_MODEL", "gemini-2.5-pro")
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model=model_name,
             temperature=0.0,
-            google_api_key=api_key,
+            api_key=api_key,
         )
 
         system_prompt = (
@@ -280,7 +285,7 @@ def _run_llm_code_review(
                 "review_passed": bool(data.get("review_passed", False)),
                 "critiques": list(data.get("critiques", [])),
                 "review_engine": "llm",
-                "model": "gemini-2.5-flash",
+                "model": model_name,
             }
     except Exception:
         return None
@@ -385,13 +390,12 @@ def shadow_council_node(state: MissionState) -> Dict[str, Any]:
        Filters comments to avoid false positives. If found, sets security_passed = False
        and immediately appends flagged lines to findings_and_issues.
     2. Semantic Code Review:
-       Uses ChatGoogleGenerativeAI (or deterministic heuristic fallback) for readability,
-       conventions, regressions, and edge-case exceptions. Sets review_passed = False
-       if quality/regression issues are detected.
+       Uses ChatGoogleGenerativeAI (SHADOW_MODEL, default: "gemini-2.5-pro", temperature=0.0)
+       or deterministic heuristic fallback for readability, conventions, regressions,
+       and edge-case exceptions. Sets review_passed = False if quality/regression issues are detected.
        Handles empty diff by evaluating pending vs completed tasks.
     3. Sets security_passed = True and review_passed = True only when both pass cleanly.
-    4. Appends a comprehensive audit trail to agent_logs specifying whether review was
-       performed by LLM (model='gemini-2.5-flash') or deterministic heuristic fallback.
+    4. Records details={"review_engine": "llm", "model": model_name, ...} in agent_logs.
 
     Returns:
         Partial state dict for LangGraph:
@@ -403,6 +407,8 @@ def shadow_council_node(state: MissionState) -> Dict[str, Any]:
     git_diff = state.get("git_diff", "")
     user_request = state.get("user_request", "")
     criteria = state.get("acceptance_criteria", [])
+
+    model_name = os.environ.get("SHADOW_MODEL", "gemini-2.5-pro")
 
     # Layer 1: Deterministic Static Regex Security Scan
     security_violations = scan_diff_for_security_flaws(git_diff)
@@ -416,7 +422,7 @@ def shadow_council_node(state: MissionState) -> Dict[str, Any]:
     review_critiques = list(review_data.get("critiques", []))
     review_passed = bool(review_data.get("review_passed", False))
     review_engine = review_data.get("review_engine", "deterministic_heuristic_fallback")
-    review_model = review_data.get("model")
+    review_model = review_data.get("model") or model_name
 
     # Aggregate distinct new findings for the feedback loop
     new_findings: List[str] = []
@@ -432,7 +438,7 @@ def shadow_council_node(state: MissionState) -> Dict[str, Any]:
     is_approved = security_passed and review_passed
     status_str = "passed" if is_approved else "failed"
 
-    engine_tag = f"model={review_model}" if review_model else f"engine={review_engine}"
+    engine_tag = f"model={review_model}" if review_engine == "llm" else f"engine={review_engine}"
 
     if is_approved:
         audit_details = (
@@ -447,19 +453,29 @@ def shadow_council_node(state: MissionState) -> Dict[str, Any]:
             rejection_reasons.append(f"{len(review_critiques)} code review/regression issue(s) detected")
         audit_details = f"AUDIT REJECTED [{engine_tag}]: {'; '.join(rejection_reasons)}."
 
+    details_dict: Dict[str, Any] = {
+        "review_engine": review_engine,
+        "model": review_model,
+        "audit_summary": audit_details,
+        "security_violations": len(security_violations),
+        "critiques": len(review_critiques),
+        "security_passed": security_passed,
+        "review_passed": review_passed,
+    }
+
     log_entry: Dict[str, Any] = {
         "agent": "shadow_council",
         "status": status_str,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "details": audit_details,
+        "message": audit_details,
+        "details": details_dict,
         "security_passed": security_passed,
         "review_passed": review_passed,
         "violations_count": len(security_violations),
         "critiques_count": len(review_critiques),
         "review_engine": review_engine,
+        "model": review_model,
     }
-    if review_model:
-        log_entry["model"] = review_model
 
     return {
         "security_passed": security_passed,
@@ -585,7 +601,7 @@ if __name__ == "__main__":
     assert res_empty_completed["review_passed"] is True
     print("[PASS] 11b. Empty diff with completed tasks & passing tests correctly approved.")
 
-    # 12. Test Clean Production Code: Both Security and Review Approved
+    # 12. Test Clean Production Code: Both Security and Review Approved with Details Dict
     diff_clean = (
         "+from typing import List\n"
         "+\n"
@@ -605,8 +621,11 @@ if __name__ == "__main__":
     assert res_clean["review_passed"] is True, "Clean code should pass review"
     assert len(res_clean["findings_and_issues"]) == 0, "Clean code should have 0 findings"
     assert res_clean["agent_logs"][0]["status"] == "passed"
-    assert "AUDIT APPROVED" in res_clean["agent_logs"][0]["details"]
-    assert "review_engine" in res_clean["agent_logs"][0]
-    print("[PASS] 12. Clean production code successfully passed and approved by Shadow Council.")
+    assert "AUDIT APPROVED" in res_clean["agent_logs"][0]["message"]
+    assert "AUDIT APPROVED" in res_clean["agent_logs"][0]["details"]["audit_summary"]
+    assert "review_engine" in res_clean["agent_logs"][0]["details"]
+    assert "model" in res_clean["agent_logs"][0]["details"]
+    assert res_clean["agent_logs"][0]["details"]["model"] == os.environ.get("SHADOW_MODEL", "gemini-2.5-pro")
+    print(f"[PASS] 12. Clean production code approved with details dict (model={res_clean['agent_logs'][0]['details']['model']}).")
 
     print("=== All hardened shadow.py security & code review self-tests passed successfully! ===")

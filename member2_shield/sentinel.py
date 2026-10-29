@@ -5,7 +5,12 @@ Full production implementation matching PECathon PS-001 requirements:
 1. Automatic Environment Loading:
    - Loads dotenv at import time so GEMINI_API_KEY / GOOGLE_API_KEY are always available.
 
-2. Sentinel Tester Node (sentinel_tester_node):
+2. Heterogeneous Model Assignment:
+   - Sentinel Dojo uses SENTINEL_MODEL (default: "gemini-2.5-flash") with temperature=0.0
+     for strict, zero-hallucination empirical evidence verification.
+   - Logs active model and verification engine in agent_logs.
+
+3. Sentinel Tester Node (sentinel_tester_node):
    - Executes pytest -v inside state["repo_path"] via run_sandboxed_command.
    - Parses stdout/stderr for exact test failures, assertion errors, and stack traces.
    - Separates stdout into passed_tests_count and failed_tests_count.
@@ -14,7 +19,7 @@ Full production implementation matching PECathon PS-001 requirements:
    - Appends clear diagnostic failure messages to findings_and_issues so Samurai knows
      the exact failing assertions.
 
-3. Sentinel Verifier Node (sentinel_verifier_node):
+4. Sentinel Verifier Node (sentinel_verifier_node):
    - Independent QA verifier comparing terminal test output and git_diff against each item
      in state["acceptance_criteria"].
    - Enforces the core PS-001 rule: Never claim success without real evidence.
@@ -245,11 +250,20 @@ def sentinel_tester_node(state: MissionState) -> Dict[str, Any]:
         f"with {len(new_findings)} diagnostic finding(s): " + "; ".join(new_findings)[:400]
     )
 
+    details_dict = {
+        "command": cmd_str,
+        "passed_count": passed_count,
+        "failed_count": failed_count,
+        "exit_code": exit_code,
+        "summary": details_str,
+    }
+
     log_entry = {
         "agent": "sentinel_tester",
         "status": status_str,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "details": details_str,
+        "message": details_str,
+        "details": details_dict,
         "command": cmd_str,
         "exit_code": exit_code,
         "passed_count": passed_count,
@@ -275,8 +289,8 @@ def _verify_with_llm(
     test_results: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     """
-    Uses LangChain Google GenAI (ChatGoogleGenerativeAI) with gemini-2.5-flash
-    to objectively verify each acceptance criterion against git_diff and test_results.
+    Uses LangChain Google GenAI (ChatGoogleGenerativeAI) with SENTINEL_MODEL (default: gemini-2.5-flash)
+    at temperature=0.0 to objectively verify each acceptance criterion against git_diff and test_results.
     Enforces the core rule: Never claim success without real evidence.
     """
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -287,10 +301,11 @@ def _verify_with_llm(
         from langchain_google_genai import ChatGoogleGenerativeAI
         from langchain_core.messages import SystemMessage, HumanMessage
 
+        model_name = os.environ.get("SENTINEL_MODEL", "gemini-2.5-flash")
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model=model_name,
             temperature=0.0,
-            google_api_key=api_key,
+            api_key=api_key,
         )
 
         system_prompt = (
@@ -354,6 +369,8 @@ def _verify_with_llm(
             return {
                 "verification_passed": bool(data.get("verification_passed", False)),
                 "unmet_criteria": formatted_unmet,
+                "verifier_engine": "llm",
+                "model": model_name,
             }
     except Exception:
         return None
@@ -440,6 +457,8 @@ def _verify_with_heuristics(
     return {
         "verification_passed": verification_passed,
         "unmet_criteria": unmet,
+        "verifier_engine": "deterministic_heuristic_fallback",
+        "model": None,
     }
 
 
@@ -448,6 +467,9 @@ def sentinel_verifier_node(state: MissionState) -> Dict[str, Any]:
     Sentinel Verifier Node:
     Acts as an independent verifier comparing git_diff and test_results against
     state["acceptance_criteria"]. Enforces: Never claim success without real evidence.
+
+    Configured with SENTINEL_MODEL (default: "gemini-2.5-flash", temperature=0.0).
+    Logs active model and verifier details in agent_logs.
 
     If an acceptance criterion claims a feature was added, but git_diff contains no
     corresponding logic or no passing test exists, marks verification_passed = False
@@ -463,6 +485,9 @@ def sentinel_verifier_node(state: MissionState) -> Dict[str, Any]:
     git_diff = state.get("git_diff", "")
     test_results = state.get("test_results", {})
 
+    active_model = os.environ.get("SENTINEL_MODEL", "gemini-2.5-flash")
+    verification_data: Dict[str, Any] = {}
+
     if not criteria:
         # If no criteria provided, require passing tests and positive diff
         tests_passed = bool(test_results.get("passed", False))
@@ -473,16 +498,27 @@ def sentinel_verifier_node(state: MissionState) -> Dict[str, Any]:
             unmet_criteria.append("UNVERIFIED CLAIM: [Automated Tests] - Test suite failed.")
         if not has_diff:
             unmet_criteria.append("UNVERIFIED CLAIM: [Code Changes] - No code modifications found in git diff.")
+        verification_data = {
+            "verification_passed": verification_passed,
+            "unmet_criteria": unmet_criteria,
+            "verifier_engine": "deterministic_heuristic_fallback",
+            "model": None,
+        }
     else:
-        # 1. Try LLM independent verification (Gemini 2.5 Flash)
-        verification_data = _verify_with_llm(criteria, git_diff, test_results)
+        # 1. Try LLM independent verification (Gemini 2.5 Flash at temperature=0.0)
+        llm_res = _verify_with_llm(criteria, git_diff, test_results)
 
         # 2. Fall back to deterministic heuristic verification if LLM is unavailable
-        if verification_data is None:
+        if llm_res is not None:
+            verification_data = llm_res
+        else:
             verification_data = _verify_with_heuristics(criteria, git_diff, test_results)
 
         verification_passed = bool(verification_data.get("verification_passed", False))
         unmet_criteria = list(verification_data.get("unmet_criteria", []))
+
+    verifier_engine = verification_data.get("verifier_engine", "deterministic_heuristic_fallback")
+    verifier_model = verification_data.get("model") or active_model
 
     status_str = "passed" if verification_passed else "failed"
     details_str = (
@@ -491,13 +527,26 @@ def sentinel_verifier_node(state: MissionState) -> Dict[str, Any]:
         else f"{len(unmet_criteria)} criteria unverified: " + "; ".join(unmet_criteria)[:400]
     )
 
+    details_dict = {
+        "model": verifier_model,
+        "model_used": active_model,
+        "verifier_engine": verifier_engine,
+        "criteria_total": len(criteria),
+        "criteria_unmet": len(unmet_criteria),
+        "summary": details_str,
+    }
+
     log_entry = {
         "agent": "sentinel_verifier",
         "status": status_str,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "details": details_str,
+        "message": details_str,
+        "details": details_dict,
         "criteria_total": len(criteria),
         "criteria_unmet": len(unmet_criteria),
+        "verifier_engine": verifier_engine,
+        "model": verifier_model,
+        "model_used": active_model,
     }
 
     return {
@@ -571,7 +620,9 @@ if __name__ == "__main__":
         res_ver_pass = sentinel_verifier_node(ver_pass_state)
         assert res_ver_pass["verification_passed"] is True
         assert len(res_ver_pass["findings_and_issues"]) == 0
-        print("[PASS] 3. sentinel_verifier_node with real evidence verified.")
+        assert "model" in res_ver_pass["agent_logs"][0]
+        assert "model_used" in res_ver_pass["agent_logs"][0]["details"]
+        print(f"[PASS] 3. sentinel_verifier_node with real evidence verified (model={res_ver_pass['agent_logs'][0]['model']}).")
 
         # 4. Test sentinel_verifier_node without evidence (UNVERIFIED CLAIM)
         ver_fail_state = {
