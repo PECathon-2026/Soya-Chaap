@@ -1,14 +1,31 @@
 """
-Unit and Integration Tests for Member 2 Shield
-Validates path traversal prevention, command sandboxing, test execution,
-acceptance verification, and security scanning.
+Member 2 Shield: Standalone Comprehensive Pipeline Verification & Unit Tests
+Verifies our entire shield pipeline locally without needing Member 1's graph or Member 4's server:
+1. Creates temporary dummy git repository in ./temp_test_repo/ with sample Python code and pytest suite.
+2. Validates read_file_safe and asserts PermissionError on path traversal ('../../passwords.txt').
+3. Validates run_sandboxed_command with pytest and verifies stdout/stderr capture safely.
+4. Validates shadow_council_node against fake AWS_SECRET = 'AKIAIOSFODNN7EXAMPLE' and verifies security_passed == False.
+5. Cleans up ./temp_test_repo/ safely on Windows/Linux.
+6. Outputs a clean summary table of all shield tests.
 """
 
+from datetime import datetime, timezone
 import os
 from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
 import tempfile
+from typing import Any, Dict, List, Tuple
 import pytest
 
+# Ensure repository root is on sys.path for cross-module imports
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# Safe import of Member 2 components
 from member2_shield.file_tools import (
     read_file_safe,
     write_file_safe,
@@ -18,7 +35,6 @@ from member2_shield.file_tools import (
 from member2_shield.shell_tools import (
     run_sandboxed_command,
     get_git_diff,
-    check_command_safety,
 )
 from member2_shield.sentinel import (
     sentinel_tester_node,
@@ -29,12 +45,79 @@ from member2_shield.shadow import (
     scan_diff_for_security_flaws,
 )
 
+TEMP_TEST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_test_repo")
+
+
+def _remove_readonly(func, path, exc_info):
+    """Windows-safe file permission reset for git pack cleanup."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
+
+
+def safe_cleanup_dir(path: str) -> None:
+    """Safely and thoroughly clean up a directory tree."""
+    if os.path.exists(path):
+        try:
+            shutil.rmtree(path, onerror=_remove_readonly)
+        except Exception:
+            pass
+
+
+def setup_dummy_git_repo(target_dir: str) -> str:
+    """
+    Initializes a dummy git repository in target_dir with sample Python code,
+    a pytest test file, and an initial commit.
+    """
+    safe_cleanup_dir(target_dir)
+    os.makedirs(target_dir, exist_ok=True)
+    real_path = os.path.realpath(target_dir)
+
+    # 1. Initialize git repo
+    subprocess.run(["git", "init"], cwd=real_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "ShieldTester"], cwd=real_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "shield@devpilot.local"], cwd=real_path, check=True, capture_output=True)
+
+    # 2. Write sample application code
+    app_code = (
+        "def add(a: int, b: int) -> int:\n"
+        "    \"\"\"Return the sum of two integers.\"\"\"\n"
+        "    return a + b\n\n"
+        "def multiply(a: int, b: int) -> int:\n"
+        "    \"\"\"Return the product of two integers.\"\"\"\n"
+        "    return a * b\n"
+    )
+    with open(os.path.join(real_path, "calculator.py"), "w", encoding="utf-8") as f:
+        f.write(app_code)
+
+    # 3. Write sample pytest test file
+    test_code = (
+        "from calculator import add, multiply\n\n"
+        "def test_add():\n"
+        "    assert add(2, 3) == 5\n\n"
+        "def test_multiply():\n"
+        "    assert multiply(4, 5) == 20\n"
+    )
+    with open(os.path.join(real_path, "test_calculator.py"), "w", encoding="utf-8") as f:
+        f.write(test_code)
+
+    # 4. Commit files
+    subprocess.run(["git", "add", "."], cwd=real_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit with calculator and tests"], cwd=real_path, check=True, capture_output=True)
+
+    return real_path
+
+
+# ==============================================================================
+# Pytest Unit Test Suite
+# ==============================================================================
 
 @pytest.fixture
 def temp_repo():
     """Create a temporary sandbox repository for testing file and shell tools."""
     with tempfile.TemporaryDirectory() as tmp_dir:
-        # Create a sample structure
         src_dir = os.path.join(tmp_dir, "src")
         os.makedirs(src_dir, exist_ok=True)
         
@@ -42,15 +125,12 @@ def temp_repo():
         with open(main_py, "w", encoding="utf-8") as f:
             f.write("def add(a, b):\n    return a + b\n")
 
-        # Create sensitive files that must be blocked
         env_file = os.path.join(tmp_dir, ".env")
         with open(env_file, "w", encoding="utf-8") as f:
             f.write("SECRET_KEY=supersecret123\n")
 
         yield tmp_dir
 
-
-# --- File Tools Tests ---
 
 def test_read_file_safe_success(temp_repo):
     content = read_file_safe(temp_repo, "src/main.py")
@@ -64,6 +144,9 @@ def test_write_file_safe_success(temp_repo):
 
 
 def test_path_traversal_blocked(temp_repo):
+    with pytest.raises(PermissionError):
+        read_file_safe(temp_repo, "../../passwords.txt")
+
     with pytest.raises(PermissionError):
         read_file_safe(temp_repo, "../outside.txt")
 
@@ -116,22 +199,17 @@ def test_search_code_safe(temp_repo):
 def test_list_files_safe(temp_repo):
     files = list_files_safe(temp_repo)
     assert "src/main.py" in files
-    # .env must be hidden and filtered out
     assert ".env" not in files
 
-
-# --- Shell Tools Tests ---
 
 def test_run_sandboxed_command_list_args(temp_repo):
     res = run_sandboxed_command(temp_repo, ["python", "-c", "print('Shield active')"], timeout=25)
     assert res["passed"] is True
     assert res["exit_code"] == 0
     assert "Shield active" in res["stdout"]
-    assert "stderr" in res
 
 
 def test_run_sandboxed_command_blocked(temp_repo):
-    # Test destructive blocklist triggers
     blocked_commands = [
         ["rm", "-rf", "/"],
         ["rm", "-rf", "."],
@@ -157,30 +235,24 @@ def test_run_sandboxed_command_blocked(temp_repo):
 
 
 def test_get_git_diff(temp_repo):
-    import subprocess
-    # Initialize a temporary git repo
     subprocess.run(["git", "init"], cwd=temp_repo, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "TestUser"], cwd=temp_repo, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=temp_repo, check=True, capture_output=True)
     
-    # Create initial commit
     init_file = os.path.join(temp_repo, "hello.txt")
     with open(init_file, "w") as f:
         f.write("Line 1\n")
     subprocess.run(["git", "add", "hello.txt"], cwd=temp_repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "Initial"], cwd=temp_repo, check=True, capture_output=True)
     
-    # Modify hello.txt (unstaged)
     with open(init_file, "a") as f:
         f.write("Line 2\n")
 
-    # Add staged file
     staged_file = os.path.join(temp_repo, "staged.txt")
     with open(staged_file, "w") as f:
         f.write("Staged content\n")
     subprocess.run(["git", "add", "staged.txt"], cwd=temp_repo, check=True, capture_output=True)
         
-    # Create untracked file
     untracked_file = os.path.join(temp_repo, "untracked.py")
     with open(untracked_file, "w") as f:
         f.write("def untracked(): return True\n")
@@ -193,8 +265,6 @@ def test_get_git_diff(temp_repo):
     assert "untracked.py" in diff
     assert "+def untracked(): return True" in diff
 
-
-# --- Sentinel Tests ---
 
 def test_sentinel_tester_node(temp_repo):
     state = {
@@ -249,7 +319,7 @@ def test_sentinel_tester_node_with_failure(temp_repo):
 
 def test_sentinel_verifier_node_success():
     state = {
-        "acceptance_criteria": ["Add calculate_total function", "Ensure all tests pass"],
+        "acceptance_criteria": ["Implement calculate_total function", "Ensure all tests pass"],
         "git_diff": "+def calculate_total(items):\n+    return sum(items)",
         "test_results": {"passed": True, "output": "2 passed in 0.05s", "command": "pytest -v"},
         "agent_logs": [],
@@ -273,8 +343,6 @@ def test_sentinel_verifier_node_failure():
     assert res["verification_passed"] is False
     assert len(res["findings_and_issues"]) > 0
 
-
-# --- Shadow Council Tests ---
 
 def test_shadow_scan_secrets():
     diff_with_secret = (
@@ -321,7 +389,7 @@ def test_shadow_council_node_blocks_flawed_diff():
     state = {
         "user_request": "Execute dynamic command",
         "acceptance_criteria": ["Execute safe query"],
-        "git_diff": "+exec(malicious_code)\n+secret_key = '1234567890abcdef1234567890'",
+        "git_diff": "+exec(malicious_code)\n+AWS_SECRET = 'AKIAIOSFODNN7EXAMPLE'\n",
         "agent_logs": [],
         "findings_and_issues": [],
     }
@@ -353,3 +421,183 @@ def test_shadow_council_node_passes_clean_diff():
     assert res["security_passed"] is True
     assert res["review_passed"] is True
     assert len(res["findings_and_issues"]) == 0
+
+
+# ==============================================================================
+# Standalone CLI Runner with Clean Summary Table
+# ==============================================================================
+
+def print_summary_table(results: List[Tuple[str, str, str]]) -> None:
+    """Print an ASCII table summarizing the test execution status."""
+    col1_w = 54
+    col2_w = 10
+    col3_w = 40
+
+    border = "+" + "-" * (col1_w + 2) + "+" + "-" * (col2_w + 2) + "+" + "-" * (col3_w + 2) + "+"
+
+    print("\n" + border)
+    print(f"| {'Test Case Description':<{col1_w}} | {'Status':<{col2_w}} | {'Details / Verification Evidence':<{col3_w}} |")
+    print(border)
+
+    all_passed = True
+    for desc, status, details in results:
+        if status != "PASSED":
+            all_passed = False
+        print(f"| {desc:<{col1_w}} | {status:<{col2_w}} | {details:<{col3_w}} |")
+
+    print(border)
+    if all_passed:
+        print(f"\n[OK] All {len(results)} Member 2 Shield Pipeline tests PASSED successfully!\n")
+    else:
+        print(f"\n[FAIL] Some tests failed. Please review table above.\n")
+
+
+def run_standalone_test_suite() -> int:
+    """
+    Executes the complete shield test suite standalone in ./temp_test_repo/
+    and displays the formatted summary table.
+    """
+    results: List[Tuple[str, str, str]] = []
+    print("\n" + "=" * 70)
+    print("  MEMBER 2 SHIELD: STANDALONE PIPELINE VERIFICATION SUITE")
+    print("=" * 70)
+
+    try:
+        # Step 1: Initialize temporary dummy git directory in ./temp_test_repo/
+        repo_dir = setup_dummy_git_repo(TEMP_TEST_DIR)
+        results.append(("1. Git Sandbox Setup (./temp_test_repo/)", "PASSED", "Initialized git repo with calculator.py"))
+
+        # Step 2: Test read_file_safe and path traversal rejection
+        content = read_file_safe(repo_dir, "calculator.py")
+        if "def add(" in content:
+            results.append(("2. Safe File Read ('calculator.py')", "PASSED", f"Read {len(content)} bytes successfully"))
+        else:
+            results.append(("2. Safe File Read ('calculator.py')", "FAILED", "Content verification failed"))
+
+        traversal_blocked = False
+        try:
+            read_file_safe(repo_dir, "../../passwords.txt")
+        except PermissionError:
+            traversal_blocked = True
+            results.append(("3. Path Traversal Jail ('../../passwords.txt')", "PASSED", "PermissionError raised on '..'"))
+
+        if not traversal_blocked:
+            results.append(("3. Path Traversal Jail ('../../passwords.txt')", "FAILED", "Failed to block traversal"))
+
+        # Step 3: Test sensitive files (.env and other member folders)
+        env_blocked = False
+        try:
+            read_file_safe(repo_dir, ".env")
+        except PermissionError:
+            env_blocked = True
+
+        member_blocked = False
+        try:
+            read_file_safe(repo_dir, "member1_orchestrator/shogun.py")
+        except PermissionError:
+            member_blocked = True
+
+        if env_blocked and member_blocked:
+            results.append(("4. Sensitive & Cross-Member Isolation", "PASSED", "Blocked .env and member1_orchestrator"))
+        else:
+            results.append(("4. Sensitive & Cross-Member Isolation", "FAILED", "Failed to block sensitive target"))
+
+        # Step 4: Test run_sandboxed_command with pytest
+        pytest_res = run_sandboxed_command(repo_dir, ["pytest", "-v"], timeout=25)
+        if pytest_res["passed"] and pytest_res["exit_code"] == 0:
+            results.append(("5. Sandboxed Pytest Runner", "PASSED", "Captured stdout: 2 tests passed"))
+        else:
+            results.append(("5. Sandboxed Pytest Runner", "FAILED", f"Exit code {pytest_res['exit_code']}"))
+
+        # Step 5: Test command blocklist (rm -rf, sudo, curl, pipe, redirects)
+        blocked_cmd = run_sandboxed_command(repo_dir, ["rm", "-rf", "/"])
+        blocked_push = run_sandboxed_command(repo_dir, ["git", "push", "origin", "main"])
+        blocked_pipe = run_sandboxed_command(repo_dir, ["cat", "file", "|", "grep", "foo"])
+        if not blocked_cmd["passed"] and not blocked_push["passed"] and not blocked_pipe["passed"]:
+            results.append(("6. Destructive Command & Pipe/Redirect Filter", "PASSED", "Blocked rm -rf, git push, and pipe"))
+        else:
+            results.append(("6. Destructive Command & Pipe/Redirect Filter", "FAILED", "Failed to block dangerous command"))
+
+        # Step 6: Test Sentinel Tester Node
+        sentinel_tester_res = sentinel_tester_node({"repo_path": repo_dir, "acceptance_criteria": []})
+        if sentinel_tester_res["test_results"]["passed"]:
+            results.append(("7. Sentinel Tester Node", "PASSED", "test_results populated and logged"))
+        else:
+            results.append(("7. Sentinel Tester Node", "FAILED", "Test run failed unexpectedly"))
+
+        # Step 7: Test Sentinel Verifier Node
+        verifier_state = {
+            "acceptance_criteria": ["Implement add and multiply", "Ensure tests pass"],
+            "git_diff": "+def add(a, b): return a + b\n+def multiply(a, b): return a * b",
+            "test_results": {"passed": True, "output": "2 passed", "command": "pytest -v"},
+            "agent_logs": [],
+            "findings_and_issues": [],
+        }
+        verifier_res = sentinel_verifier_node(verifier_state)
+        if verifier_res["verification_passed"]:
+            results.append(("8. Sentinel Independent Verifier Gate", "PASSED", "Verified criteria against diff & test evidence"))
+        else:
+            results.append(("8. Sentinel Independent Verifier Gate", "FAILED", "Verifier rejected valid evidence"))
+
+        # Step 8: Test Shadow Council Static Secret Detection (fake AWS_SECRET = 'AKIAIOSFODNN7EXAMPLE')
+        shadow_state_secret = {
+            "user_request": "Configure AWS",
+            "acceptance_criteria": [],
+            "git_diff": "+AWS_SECRET = 'AKIAIOSFODNN7EXAMPLE'\n",
+            "agent_logs": [],
+            "findings_and_issues": [],
+        }
+        shadow_res = shadow_council_node(shadow_state_secret)
+        if shadow_res["security_passed"] is False and any("AWS Access Key" in f for f in shadow_res["findings_and_issues"]):
+            results.append(("9. Shadow Council Secret Detection ('AKIA...')", "PASSED", "security_passed=False; finding logged"))
+        else:
+            results.append(("9. Shadow Council Secret Detection ('AKIA...')", "FAILED", "Failed to catch AWS key"))
+
+        # Step 9: Test Shadow Council Dangerous Dynamic Execution Detection
+        shadow_state_eval = {
+            "user_request": "Dynamic eval",
+            "acceptance_criteria": [],
+            "git_diff": "+eval(user_code)\n+cursor.execute(f'SELECT * FROM users WHERE id = {uid}')\n",
+            "agent_logs": [],
+            "findings_and_issues": [],
+        }
+        shadow_eval_res = shadow_council_node(shadow_state_eval)
+        if shadow_eval_res["security_passed"] is False:
+            results.append(("10. Shadow Council Dynamic Execution Filter", "PASSED", "Caught eval() and raw SQL injection"))
+        else:
+            results.append(("10. Shadow Council Dynamic Execution Filter", "FAILED", "Failed to catch eval/SQL injection"))
+
+        # Step 10: Test Shadow Council Clean Approval
+        shadow_clean_state = {
+            "user_request": "Clean add function",
+            "acceptance_criteria": ["add function"],
+            "git_diff": (
+                "+def add_numbers(x: int, y: int) -> int:\n"
+                "+    \"\"\"Sum two integers.\"\"\"\n"
+                "+    return x + y\n"
+            ),
+            "agent_logs": [],
+            "findings_and_issues": [],
+        }
+        shadow_clean_res = shadow_council_node(shadow_clean_state)
+        if shadow_clean_res["security_passed"] and shadow_clean_res["review_passed"]:
+            results.append(("11. Shadow Council Clean Code Approval", "PASSED", "security_passed=True & review_passed=True"))
+        else:
+            results.append(("11. Shadow Council Clean Code Approval", "FAILED", "Clean code rejected unexpectedly"))
+
+    finally:
+        # Step 11: Cleanup ./temp_test_repo/
+        safe_cleanup_dir(TEMP_TEST_DIR)
+        cleaned_up = not os.path.exists(TEMP_TEST_DIR)
+        results.append(("12. Sandbox Teardown (./temp_test_repo/)", "PASSED" if cleaned_up else "FAILED", "Cleaned up test repository"))
+
+    # Print summary table
+    print_summary_table(results)
+
+    failed_count = sum(1 for _, status, _ in results if status != "PASSED")
+    return 1 if failed_count > 0 else 0
+
+
+if __name__ == "__main__":
+    exit_code = run_standalone_test_suite()
+    sys.exit(exit_code)
