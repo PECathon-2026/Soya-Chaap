@@ -6,7 +6,7 @@ Responsibilities:
 - Inspects target repository context using safe shield tools.
 - Deconstructs user requests into structured acceptance criteria and granular tasks.
 - On iteration_count > 0, inspects findings_and_issues to dynamically adapt and refine the execution plan.
-- Emits structured updates complying with MissionState schema and additive reducer rules.
+- Emits structured updates complying with MissionState schema and additive reducer format.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ try:
     from member2_shield.file_tools import list_files_safe, read_file_safe
 except ImportError:
     def list_files_safe(repo_path: str) -> List[str]:
+        """Safe local directory inspection fallback if Member 2 is not yet present."""
         repo_full = os.path.realpath(repo_path)
         collected: List[str] = []
         for root, dirs, files in os.walk(repo_full):
@@ -74,6 +75,7 @@ except ImportError:
         return sorted(collected)
 
     def read_file_safe(repo_path: str, relative_path: str) -> str:
+        """Safe local file reading fallback preventing directory traversal."""
         repo_full = os.path.realpath(repo_path)
         target = os.path.realpath(os.path.join(repo_full, relative_path))
         if not (target == repo_full or target.startswith(repo_full + os.sep)):
@@ -146,7 +148,6 @@ def _inspect_codebase(repo_path: str, user_request: str) -> Dict[str, Any]:
     for path in relevant_files[:8]:
         try:
             content = read_file_safe(repo_path, path)
-            # Store snippet up to 200 lines
             lines = content.splitlines()
             context["key_snippets"][path] = "\n".join(lines[:200])
         except Exception as exc:
@@ -173,7 +174,7 @@ def _deterministic_plan(
     test_files = repo_context.get("test_files", [])
 
     if iteration_count == 0:
-        # Initial Planning Phase
+        # Initial Planning Phase (iteration_count == 0)
         criteria = [
             f"Fulfill core request: {user_request.strip()}",
             "Preserve existing architecture, style, and conventions without introducing syntax defects",
@@ -223,20 +224,20 @@ def _deterministic_plan(
         )
 
         adapted_tasks: List[TaskItemModel] = []
-        # Carry over existing tasks with preserved status
+        # Mark all failed tasks as pending so Samurai re-executes them to fix defects
         for t in existing_tasks:
-            status = "completed" if t.get("status") == "completed" else "failed"
+            current_status = t.get("status", "pending")
+            new_status = "pending" if current_status == "failed" else current_status
             adapted_tasks.append(
                 TaskItemModel(
                     id=t["id"],
                     description=t["description"],
                     target_files=t["target_files"],
-                    status=status,
+                    status=new_status,
                 )
             )
 
-        # Formulate explicit remediation tasks from findings_and_issues
-        # Parse referenced file paths or common defect types in findings
+        # Formulate explicit remediation task from findings_and_issues
         referenced_files: List[str] = []
         for issue in findings:
             for path in file_tree:
@@ -300,6 +301,7 @@ def _invoke_llm_planner(
         system_prompt = (
             "You are The Shogun's Council: the strategic planning and reconnaissance agent of the DevPilot AI Engineering Guild. "
             "Your duty is to formulate unambiguous, measurable acceptance criteria and granular, actionable implementation tasks. "
+            "If iteration_count > 0, inspect findings_and_issues, mark failed tasks as pending, and adapt the plan to resolve blockers. "
             "Adhere strictly to existing conventions, file structures, and safety standards."
         )
 
@@ -347,8 +349,11 @@ def shogun_planner_node(state: MissionState) -> Dict[str, Any]:
     
     1. Inspects repo_path using safe tools from member2_shield.file_tools.
     2. Synthesizes user_request and existing files into acceptance_criteria and tasks.
-    3. If iteration_count > 0, analyzes findings_and_issues to dynamically adapt the plan.
-    4. Returns updated acceptance_criteria, tasks, and an additive agent_logs entry.
+    3. If iteration_count == 0: generates initial acceptance_criteria and tasks (status: pending).
+    4. If iteration_count > 0: inspects findings_and_issues, revises tasks, marks failed tasks
+       as pending, and logs an explanation of how the plan adapted to overcome blockers.
+    5. Returns updated acceptance_criteria, tasks, and an additive agent_logs entry:
+       {"agent_logs": [{"agent": "shogun_planner", "action": "...", "details": ...}]}
     """
     user_request = state.get("user_request", "")
     repo_path = state.get("repo_path", ".")
@@ -393,25 +398,29 @@ def shogun_planner_node(state: MissionState) -> Dict[str, Any]:
         for t in plan.tasks
     ]
 
-    # Construct additive agent_logs entry (ONLY new logs, preserving reducer integrity)
-    log_message = (
-        f"Shogun plan established: {len(formatted_tasks)} tasks, "
-        f"{len(plan.acceptance_criteria)} acceptance criteria."
+    action = "plan_generated" if iteration_count == 0 else "plan_adapted"
+    explanation = (
+        f"Initial mission plan generated with {len(formatted_tasks)} tasks and {len(plan.acceptance_criteria)} criteria."
         if iteration_count == 0
-        else f"Shogun plan adapted for iteration {iteration_count}: resolved {len(findings)} prior findings."
+        else (
+            f"Adapted plan for iteration {iteration_count}: analyzed {len(findings)} findings, "
+            f"marked failed tasks as pending, and formulated targeted remediation tasks to overcome blockers."
+        )
     )
 
     log_entry: Dict[str, Any] = {
         "agent": "shogun_planner",
+        "action": action,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "iteration": iteration_count,
-        "message": log_message,
+        "message": explanation,
         "details": {
             "rationale": plan.rationale,
             "task_ids": [t["id"] for t in formatted_tasks],
             "acceptance_criteria_count": len(plan.acceptance_criteria),
             "files_discovered": len(repo_context.get("file_tree", [])),
-            "remediation_mode": iteration_count > 0,
+            "adaptation_explanation": explanation,
+            "findings_count": len(findings),
         },
     }
 
@@ -420,4 +429,3 @@ def shogun_planner_node(state: MissionState) -> Dict[str, Any]:
         "tasks": formatted_tasks,
         "agent_logs": [log_entry],
     }
-
