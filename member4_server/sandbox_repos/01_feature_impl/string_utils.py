@@ -18,3 +18,15 @@ def count_words(text: str) -> int:
     if not text or not text.strip():
         return 0
     return len(text.strip().split())
+
+
+def slugify(text: str) -> str:
+    """Converts input text into a URL-friendly slug.
+    Lowercases, trims, and replaces non-alphanumeric characters with hyphens.
+    """
+    import re
+    if not text:
+        return ""
+    text = text.strip().lower()
+    text = re.sub(r'[^a-z0-9]+', '-', text)
+    return text.strip('-')

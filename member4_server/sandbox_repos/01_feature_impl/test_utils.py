@@ -40,3 +40,11 @@ def test_count_words_empty():
 
 def test_count_words_single():
     assert count_words("DevPilot") == 1
+
+
+def test_slugify():
+    from string_utils import slugify
+    assert slugify("Hello World! 123") == "hello-world-123"
+    assert slugify("  Autonomous Agent Guild  ") == "autonomous-agent-guild"
+    assert slugify("Special @#$% Characters") == "special-characters"
+    assert slugify("") == ""
