@@ -81,6 +81,37 @@ class ConnectionManager:
         for conn in disconnected:
             self.disconnect(conn)
 
+        # Broadcast lowercase event aliases with state dictionary for frontend
+        aliases = {
+            "NODE_STARTED": "node_start",
+            "NODE_COMPLETED": "node_finish",
+            "AWAITING_HUMAN_APPROVAL": "interrupt",
+            "MISSION_COMPLETED": "complete",
+            "MISSION_STARTED": "status",
+            "DIFF_UPDATED": "diff",
+        }
+        if event_type in aliases:
+            alias_name = aliases[event_type]
+            alias_payload = {
+                "event": alias_name,
+                "data": {
+                    **data,
+                    "state": {
+                        "acceptance_criteria": data.get("details", {}).get("acceptance_criteria") or data.get("acceptance_criteria", []),
+                        "tasks": data.get("details", {}).get("tasks") or data.get("tasks", []),
+                        "agent_logs": [{"source": data.get("node", "DevPilot"), "text": data.get("description", "") or data.get("summary", "")}],
+                        "git_diff": data.get("git_diff", "") or active_mission.current_diff,
+                        "iteration_count": data.get("iteration", active_mission.current_iteration),
+                    }
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            for connection in self.active_connections:
+                try:
+                    await connection.send_text(json.dumps(alias_payload))
+                except Exception:
+                    pass
+
         return payload
 
     def get_history(self) -> List[Dict[str, Any]]:
@@ -98,13 +129,21 @@ manager = ConnectionManager()
 # ============================================================================
 
 class MissionStartRequest(BaseModel):
-    scenario_name: str = Field(
-        ...,
+    scenario_name: Optional[str] = Field(
+        None,
         description="Name of the scenario directory in sandbox_repos (e.g. 02_bug_investigation)",
+    )
+    scenario_key: Optional[str] = Field(
+        None,
+        description="Alternative key for scenario name from frontend requests.",
     )
     user_request: Optional[str] = Field(
         None,
         description="Natural language instruction for the engineering guild.",
+    )
+    model_provider: Optional[str] = Field(
+        default="gemini",
+        description="LLM model provider identifier.",
     )
     max_iterations: int = Field(
         default=3,
@@ -809,9 +848,10 @@ async def websocket_mission_stream(websocket: WebSocket):
 @app.post("/api/mission/start")
 async def start_mission(request: MissionStartRequest):
     """Spawns an autonomous mission for the specified scenario."""
-    scenario_path = os.path.join(SANDBOX_REPOS_DIR, request.scenario_name)
+    target_scenario = request.scenario_name or request.scenario_key or "01_feature_impl"
+    scenario_path = os.path.join(SANDBOX_REPOS_DIR, target_scenario)
     if not os.path.exists(scenario_path):
-        raise HTTPException(status_code=404, detail=f"Scenario repository '{request.scenario_name}' not found.")
+        raise HTTPException(status_code=404, detail=f"Scenario repository '{target_scenario}' not found.")
 
     if active_mission.status == "running":
         raise HTTPException(status_code=409, detail="A mission is already currently active and running.")
@@ -820,9 +860,9 @@ async def start_mission(request: MissionStartRequest):
     active_mission.reset()
     mission_id = str(uuid.uuid4())
     active_mission.mission_id = mission_id
-    active_mission.scenario_name = request.scenario_name
+    active_mission.scenario_name = target_scenario
     active_mission.repo_path = scenario_path
-    meta = SCENARIO_METADATA.get(request.scenario_name, {})
+    meta = SCENARIO_METADATA.get(target_scenario, {})
     active_mission.user_request = request.user_request or meta.get("default_request", "Resolve scenario")
     active_mission.max_iterations = request.max_iterations
 
@@ -833,7 +873,7 @@ async def start_mission(request: MissionStartRequest):
     active_mission.task_handle = asyncio.create_task(
         run_mission_workflow(
             mission_id=mission_id,
-            scenario_name=request.scenario_name,
+            scenario_name=target_scenario,
             repo_path=scenario_path,
             user_request=active_mission.user_request,
             max_iterations=request.max_iterations,
@@ -843,7 +883,8 @@ async def start_mission(request: MissionStartRequest):
     return {
         "status": "started",
         "mission_id": mission_id,
-        "scenario": request.scenario_name,
+        "scenario": target_scenario,
+        "scenario_key": target_scenario,
         "repo_path": scenario_path,
         "user_request": active_mission.user_request,
     }
@@ -858,9 +899,13 @@ async def approve_mission(request: ApprovalRequest):
             detail=f"Cannot process approval. Current status is '{active_mission.status}', not 'awaiting_approval'.",
         )
 
-    decision_clean = request.decision.lower().strip()
-    if decision_clean not in ["approved", "rejected"]:
-        raise HTTPException(status_code=400, detail="Decision must be either 'approved' or 'rejected'.")
+    decision_raw = request.decision.lower().strip()
+    if decision_raw in ["approve", "approved"]:
+        decision_clean = "approved"
+    elif decision_raw in ["reject", "rejected"]:
+        decision_clean = "rejected"
+    else:
+        raise HTTPException(status_code=400, detail="Decision must be either 'approve'/'approved' or 'reject'/'rejected'.")
 
     active_mission.approval_decision = {
         "decision": decision_clean,

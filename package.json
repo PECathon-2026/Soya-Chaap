@@ -1,0 +1,14 @@
+{
+  "name": "devpilot-guild",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DevPilot — The Mystic Mikado's Autonomous AI Engineering Guild (PS-001)",
+  "scripts": {
+    "dev": "node run_dev.js",
+    "dev:backend": "python -m uvicorn member4_server.main:app --host 127.0.0.1 --port 8000 --reload",
+    "dev:frontend": "npm --prefix member3_frontend run dev:frontend",
+    "build": "npm --prefix member3_frontend run build",
+    "test:backend": "python -m pytest member4_server/sandbox_repos"
+  }
+}
+

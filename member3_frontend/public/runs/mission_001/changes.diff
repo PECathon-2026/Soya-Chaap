@@ -1,0 +1,76 @@
+diff --git a/src/api/webhook.ts b/src/api/webhook.ts
+index 4f83a21..9e1b204 100644
+--- a/src/api/webhook.ts
++++ b/src/api/webhook.ts
+@@ -1,15 +1,24 @@
+ import { Request, Response } from 'express';
+ import crypto from 'crypto';
++import { getRedisClient } from '../lib/redis';
++import { STRIPE_WEBHOOK_SECRET } from '../config/stripe';
+
+-const processedEvents = new Set<string>();
++const IDEMPOTENCY_TTL_SECONDS = 86400; // 24 hours
+
+ export async function handleStripeWebhook(req: Request, res: Response) {
+   const signature = req.headers['stripe-signature'] as string;
+   if (!signature) {
+     return res.status(400).json({ error: 'Missing stripe-signature header' });
+   }
+
+-  // Verify signature
++  // Verify signature with timing-safe comparison
++  const hmac = crypto.createHmac('sha256', STRIPE_WEBHOOK_SECRET);
++  const digest = Buffer.from(hmac.update(req.body).digest('hex'), 'utf8');
++  const checksum = Buffer.from(signature, 'utf8');
++  if (digest.length !== checksum.length || !crypto.timingSafeEqual(digest, checksum)) {
++    return res.status(401).json({ error: 'Invalid webhook signature' });
++  }
+
+   const event = JSON.parse(req.body.toString());
+   const eventId = event.id;
+@@ -20,11 +29,22 @@ export async function handleStripeWebhook(req: Request, res: Response) {
+-  if (processedEvents.has(eventId)) {
+-    return res.status(200).json({ received: true, deduplicated: true });
+-  }
+-  processedEvents.add(eventId);
++  // Atomic Redis lock to guarantee idempotency across distributed nodes
++  const redis = getRedisClient();
++  const lockKey = `webhook:lock:${eventId}`;
++  const acquired = await redis.set(lockKey, '1', 'NX', 'EX', IDEMPOTENCY_TTL_SECONDS);
++
++  if (!acquired) {
++    // Duplicate delivery received within 24h: return 200 OK without re-processing
++    return res.status(200).json({
++      received: true,
++      deduplicated: true,
++      message: 'Event already processed'
++    });
++  }
+
+   try {
+     await processBillingEvent(event);
+     return res.status(200).json({ status: 'success' });
+   } catch (err) {
++    await redis.del(lockKey); // release lock on transient error so retry can succeed
+     return res.status(500).json({ error: 'Event processing failed' });
+   }
+ }
+diff --git a/src/config/stripe.ts b/src/config/stripe.ts
+index b83a129..c3f8021 100644
+--- a/src/config/stripe.ts
++++ b/src/config/stripe.ts
+@@ -10,7 +10,13 @@ export const STRIPE_API_VERSION = '2023-10-16';
+
+-// INSECURE: Do not keep credentials in source
+-export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || 'whsec_9b2e8a1f4c7d01824ac';
++const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
++if (!webhookSecret && process.env.NODE_ENV === 'production') {
++  throw new Error('FATAL: STRIPE_WEBHOOK_SECRET environment variable is missing.');
++}
++
++export const STRIPE_WEBHOOK_SECRET = webhookSecret || 'whsec_test_mock_secret_for_local_ci_only';
++
++export const STRIPE_RETRY_CONFIG = {
++  maxRetries: 3,
++  initialTimeoutMs: 1000,
++};
